@@ -65,7 +65,8 @@ class StatsResource(Resource):
             count_subj = supabase.table('subjects').select('*', count='exact').limit(0).execute().count
             count_rooms = supabase.table('classrooms').select('*', count='exact').limit(0).execute().count
             return {"students": count_std, "instructors": count_ins, "subjects": count_subj, "rooms": count_rooms}
-        except Exception:
+        except Exception as e:
+            print(f"🔥🔥 FIRE IN THE HOLE! Error fetching stats: {e}")  # ให้มันตะโกนออกมาใน Log
             return {"students": 0, "instructors": 0, "subjects": 0, "rooms": 0}
 
 
