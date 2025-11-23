@@ -5,5 +5,5 @@ gunicorn==21.2.0
 supabase==2.3.0
 deap==1.4.1
 python-dotenv==1.0.0
-numpy==1.26.0
+numpy
 werkzeug==3.0.1
