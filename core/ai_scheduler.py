@@ -17,13 +17,14 @@ DAYS = 5
 SLOTS_PER_DAY = 10
 LUNCH_SLOT = 4
 
-# Config: เพิ่ม Mutation Rate เพื่อให้ AI หาทางออกจากกรอบที่แคบลงได้
+# ปรับ Config: ลด mutation ลงนิดหน่อย เพราะเราจัดตารางดีตั้งแต่เริ่มแล้ว
 GEN_CONFIGS = {
-    'balanced': {'pop_size': 500, 'generations': 100, 'runs': 1, 'mutation_prob': 0.3},
+    'balanced': {'pop_size': 500, 'generations': 100, 'runs': 1, 'mutation_prob': 0.2},
 }
 
 # --- 3. Helper Functions ---
 def get_course_metadata(course):
+    """ดึงข้อมูลวิชา และระบุประเภทห้องที่บังคับ"""
     subj = course.get('subjects', {}) or {}
     if isinstance(subj, list): subj = subj[0] 
     
@@ -66,69 +67,138 @@ def find_stadium_index(room_ids):
             return idx
     return len(room_ids) - 1
 
-# --- 4. Initialization ---
+# --- 4. Smart Initialization (หัวใจสำคัญที่แก้ใหม่) ---
 def create_smart_individual(courses, room_count, allowed_teachers_map, room_ids):
     ind = [None] * len(courses)
     stadium_idx = find_stadium_index(room_ids)
     
-    # หา index ของห้องแต่ละประเภทเตรียมไว้
+    # เตรียม Index ห้อง
     comp_rooms = [i for i, r in enumerate(room_ids) if r in ['LB101', 'LB102']]
     theory_rooms = [i for i, r in enumerate(room_ids) if r in ['TH201', 'TH202']]
-    
-    # Fallback: ถ้าหาไม่เจอ ให้ใช้ห้องแรกไปก่อน (กัน Crash)
     if not comp_rooms: comp_rooms = [0]
     if not theory_rooms: theory_rooms = [0]
 
+    # --- Tracking Usage (จดบันทึกการจอง เพื่อกันชนตั้งแต่เริ่ม) ---
+    # ใช้ Set เก็บ (TimeSlot, EntityID)
+    used_teacher_slots = set() # (slot, teacher_id)
+    used_room_slots = set()    # (slot, room_idx)
+    used_student_slots = set() # (slot, group_id)
+
+    # สับลำดับวิชา เพื่อไม่ให้ลำดับเดิมได้เปรียบตลอด
     indices = list(range(len(courses)))
     random.shuffle(indices)
 
     for i in indices:
         course = courses[i]
         duration, is_scout, is_comp_subj, is_theory_subj = get_course_metadata(course)
+        
+        # Group ID
+        dept = course.get('department')
+        yr = course.get('year_level')
+        grp = course.get('group_no', '1')
+        group_id = f"{dept}_{yr}_{grp}"
+
         valid_teachers = allowed_teachers_map.get(i, [0])
         teacher_idx = random.choice(valid_teachers) if valid_teachers else 0
-        
-        # --- Logic การเลือกห้องแบบเจาะจง ---
+        teacher_db_id = i # หมายเหตุ: จริงๆ ควรเป็น DB ID แต่ใน init ใช้ idx แทนไปก่อนเพื่อ unique check
+
+        # --- กรณี 1: ลูกเสือ (Fixed) ---
         if is_scout:
-            ind[i] = [stadium_idx, 27, teacher_idx] # Wed 15:00
+            # พุธ 15.00 = Slot 27 (Day 2, Slot 7)
+            final_slot = 27
+            room_idx = stadium_idx
             
-        elif is_comp_subj:
-            # บังคับห้องคอม (LB)
-            room_idx = random.choice(comp_rooms)
-            ind[i] = generate_random_slot(room_idx, teacher_idx, duration)
+            # บันทึกการจอง (ถึงจะชนก็ต้องลง เพราะเป็นกฎตายตัว)
+            for t in range(duration):
+                curr = final_slot + t
+                used_teacher_slots.add((curr, teacher_idx))
+                used_room_slots.add((curr, room_idx))
+                used_student_slots.add((curr, group_id))
             
-        elif is_theory_subj:
-            # บังคับห้องทฤษฎี (TH)
-            room_idx = random.choice(theory_rooms)
-            ind[i] = generate_random_slot(room_idx, teacher_idx, duration)
+            ind[i] = [room_idx, final_slot, teacher_idx]
+            continue
+
+        # --- กรณี 2: วิชาทั่วไป/คอม/ทฤษฎี (ต้องหาช่องว่าง) ---
+        
+        # เลือกกลุ่มห้องที่ถูกต้อง
+        candidate_rooms = list(range(room_count))
+        if is_comp_subj: candidate_rooms = comp_rooms
+        elif is_theory_subj: candidate_rooms = theory_rooms
+        
+        # สุ่มลำดับห้องที่จะลอง เพื่อความหลากหลาย
+        random.shuffle(candidate_rooms)
+        
+        found_placement = False
+        
+        # วนหาห้องที่ว่าง
+        for room_idx in candidate_rooms:
+            # สร้างลิสต์เวลาที่เป็นไปได้ทั้งหมด (5 วัน x 9 คาบ - พักเที่ยง)
+            possible_starts = []
+            for d in range(DAYS):
+                for s in range(SLOTS_PER_DAY - duration + 1):
+                    # ข้ามคาบพักเที่ยง
+                    if s <= LUNCH_SLOT < s + duration: continue
+                    # ข้ามเลิกเรียนดึก (Optional)
+                    if s + duration > 9: continue 
+                    
+                    possible_starts.append((d * SLOTS_PER_DAY) + s)
             
-        else:
-            # วิชาทั่วไป
-            room_idx = random.randint(0, room_count - 1)
-            ind[i] = generate_random_slot(room_idx, teacher_idx, duration)
+            random.shuffle(possible_starts) # สุ่มเวลาที่จะลอง
+
+            for start_slot in possible_starts:
+                # เช็คว่า Slot นี้ว่างไหม (สำหรับ ครู, นักเรียน, ห้อง)
+                collision = False
+                for t in range(duration):
+                    curr = start_slot + t
+                    
+                    # 1. เช็คห้อง
+                    if (curr, room_idx) in used_room_slots: 
+                        collision = True; break
+                    # 2. เช็คครู
+                    if (curr, teacher_idx) in used_teacher_slots:
+                        collision = True; break
+                    # 3. เช็คนักเรียน
+                    if (curr, group_id) in used_student_slots:
+                        collision = True; break
+                
+                if not collision:
+                    # เจอช่องว่างแล้ว! จองเลย
+                    for t in range(duration):
+                        curr = start_slot + t
+                        used_room_slots.add((curr, room_idx))
+                        used_teacher_slots.add((curr, teacher_idx))
+                        used_student_slots.add((curr, group_id))
+                    
+                    ind[i] = [room_idx, start_slot, teacher_idx]
+                    found_placement = True
+                    break
+            
+            if found_placement: break
+        
+        # ถ้าหาช่องลงไม่ได้จริงๆ (หายากมาก) -> สุ่มมั่วไปก่อน (ให้ Penalty จัดการ)
+        if not found_placement:
+            fallback_room = candidate_rooms[0]
+            d = random.randint(0, DAYS - 1)
+            s = random.randint(0, 8)
+            if s >= LUNCH_SLOT: s+=1
+            if s+duration > SLOTS_PER_DAY: s = SLOTS_PER_DAY - duration
+            final_slot = (d * SLOTS_PER_DAY) + s
+            ind[i] = [fallback_room, final_slot, teacher_idx]
 
     return creator.Individual(ind)
 
-def generate_random_slot(room_idx, teacher_idx, duration):
-    # ฟังก์ชันช่วยสุ่มเวลา (จะได้ไม่ต้องเขียนซ้ำ)
-    d = random.randint(0, DAYS - 1)
-    s = random.randint(0, 8) 
-    if s >= LUNCH_SLOT: s += 1 
-    if s + duration > SLOTS_PER_DAY: s = SLOTS_PER_DAY - duration
-    final_slot = (d * SLOTS_PER_DAY) + s
-    return [room_idx, final_slot, teacher_idx]
-
-# --- 5. Mutation ---
-def smart_mutate(individual, courses, room_count, allowed_teachers_map, indpb=0.3):
+# --- 5. Mutation (ปรับให้ไม่ทำลายโครงสร้างที่ดี) ---
+def smart_mutate(individual, courses, room_count, allowed_teachers_map, indpb=0.2):
     for i, gene in enumerate(individual):
         _, is_scout, is_comp_subj, is_theory_subj = get_course_metadata(courses[i])
         
-        if is_scout: continue # ห้ามแตะลูกเสือ
+        if is_scout: continue 
         
-        # Mutate Room: ห้ามเปลี่ยนห้อง ถ้าเป็นวิชาบังคับ (Comp/Theory)
+        # Mutate Room: ต้องเปลี่ยนใน scope ห้องที่กำหนด
         if random.random() < indpb:
             if not is_comp_subj and not is_theory_subj:
                 gene[0] = random.randint(0, room_count - 1)
+            # ถ้าเป็น Comp/Theory ไม่เปลี่ยนห้อง (เพื่อรักษา Hard Constraint)
         
         # Mutate Time
         if random.random() < indpb: 
@@ -137,6 +207,9 @@ def smart_mutate(individual, courses, room_count, allowed_teachers_map, indpb=0.
             s = random.choice(candidates)
             duration, _, _, _ = get_course_metadata(courses[i])
             if s + duration > SLOTS_PER_DAY: s = SLOTS_PER_DAY - duration
+            
+            # (Optional) เช็คคร่าวๆ ว่าเปลี่ยนแล้วชนไหม ถ้าชนไม่เปลี่ยน
+            # แต่เพื่อความเร็ว ปล่อยให้ GA ตัดสินใจ
             gene[1] = (d * SLOTS_PER_DAY) + s
             
         # Mutate Teacher
@@ -146,7 +219,7 @@ def smart_mutate(individual, courses, room_count, allowed_teachers_map, indpb=0.
                 
     return individual,
 
-# --- 6. Fitness Function ---
+# --- 6. Fitness Function (Penalty หนักๆ) ---
 def evaluate(individual, courses, room_ids, instructor_ids, 
              room_details, instructor_details_map, head_instructor_ids):
     penalty = 0
@@ -178,42 +251,31 @@ def evaluate(individual, courses, room_ids, instructor_ids,
         end_slot = slot + duration
 
         # --- Rule Checks ---
-        
-        # 1. บังคับห้องคอม (LB101, LB102)
-        if is_comp_subj:
-            if room_code not in ['LB101', 'LB102']:
-                penalty += 1_000_000
-
-        # 2. บังคับห้องทฤษฎี (TH201, TH202) -> เพิ่มใหม่
-        if is_theory_subj:
-            if room_code not in ['TH201', 'TH202']:
-                penalty += 1_000_000
-
-        # 3. ลูกเสือ
+        if is_comp_subj and room_code not in ['LB101', 'LB102']:
+            penalty += 1_000_000
+        if is_theory_subj and room_code not in ['TH201', 'TH202']:
+            penalty += 1_000_000
         if is_scout:
             if day != 2 or slot != 7: penalty += 1_000_000
             if not any(x in room_code.lower() for x in ['สนาม', 'stadium', 'field']):
                  penalty += 500_000 
-
-        # 4. ครูเมธา
+        
         if 'เมธา' in teacher_obj.get('first_name', ''):
             if day == 0 and slot < 4: penalty += 50_000
             if day == 4 and slot >= 5: penalty += 50_000
 
-        # 5. เลิกเรียนเย็นเกิน
         if end_slot > 9: penalty += 100_000
 
         for t in range(duration):
             curr_abs = start_slot + t
             curr_slot_in_day = slot + t
             
-            # ห้ามพักเที่ยง
             if curr_slot_in_day == LUNCH_SLOT: penalty += 1_000_000
             
             teacher_hours[teacher_id] += 1
             teacher_days_active[teacher_id].add(day)
             
-            # Zero Tolerance Collisions
+            # Collision Checks (Penalty สูงลิ่ว)
             if (curr_abs, r_idx) in room_usage: penalty += 1_000_000
             else: room_usage[(curr_abs, r_idx)] = True
             
