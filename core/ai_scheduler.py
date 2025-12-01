@@ -185,15 +185,15 @@ def evaluate(individual, courses, room_ids, instructor_ids,
             teacher_days_active[teacher_id].add(day)
             
             # กฎข้อ 6: ห้องชน
-            if (curr_abs, r_idx) in room_usage: penalty += 500_000
+            if (curr_abs, r_idx) in room_usage: penalty +=1_000_000
             else: room_usage[(curr_abs, r_idx)] = True
             
             # กฎข้อ 4, 5: ครูชน
-            if (curr_abs, teacher_id) in teacher_usage: penalty += 500_000
+            if (curr_abs, teacher_id) in teacher_usage: penalty +=1_000_000
             else: teacher_usage[(curr_abs, teacher_id)] = True
                 
             # กฎข้อ 3: นร.ชน
-            if (curr_abs, group_id) in student_usage: penalty += 500_000
+            if (curr_abs, group_id) in student_usage: penalty +=1_000_000
             else: student_usage[(curr_abs, group_id)] = True
 
     # --- Summary Checks ---
