@@ -17,17 +17,17 @@ DAYS = 5
 SLOTS_PER_DAY = 10  # 08:00 - 17:00
 LUNCH_SLOT = 4      # 12:00 - 13:00
 
+# เพิ่มขนาดประชากรและรอบการทำงาน เพื่อให้ AI หาคำตอบได้ดีขึ้น
 GEN_CONFIGS = {
-    'balanced': {'pop_size': 500, 'generations': 150, 'runs': 1, 'mutation_prob': 0.2},
-    'precise':  {'pop_size': 800, 'generations': 300, 'runs': 1, 'mutation_prob': 0.1},
-    'fast':     {'pop_size': 200, 'generations': 50,  'runs': 1, 'mutation_prob': 0.3}
+    'balanced': {'pop_size': 800, 'generations': 200, 'runs': 1, 'mutation_prob': 0.3},
+    'precise':  {'pop_size': 1000, 'generations': 500, 'runs': 1, 'mutation_prob': 0.2},
+    'fast':     {'pop_size': 300, 'generations': 50,  'runs': 1, 'mutation_prob': 0.4}
 }
 
 # --- 3. Helper Functions ---
 def get_course_metadata(course):
-    """ดึงข้อมูลวิชา โดยอิงตาม Schema ใหม่"""
+    """ดึงข้อมูลวิชา"""
     subj = course.get('subjects', {}) or {}
-    # กรณี Supabase return เป็น list
     if isinstance(subj, list): subj = subj[0] 
     
     # 1. Duration
@@ -40,80 +40,98 @@ def get_course_metadata(course):
     subj_name = str(subj.get('subject_name', '')).lower()
     subj_code = str(course.get('subject_code', '')).lower()
     
-    # 3. Flags (กฎข้อ 7 และ 16)
+    # 3. Flags
     is_scout = 'ลูกเสือ' in subj_name or 'scout' in subj_name
     is_computer_subj = 'คอมพิวเตอร์' in subj_name or 'computer' in subj_name or 'code' in subj_code
     
-    # 4. Advisor (กฎข้อ 17)
-    # หมายเหตุ: ใน Schema 'curriculums' ไม่มี advisor_id 
-    # ดังนั้น return None เพื่อข้ามการเช็ค Rule 17 ชั่วคราวป้องกัน Error
     advisor_id = None 
     
     return duration, is_scout, is_computer_subj, advisor_id
 
+def find_stadium_index(room_ids):
+    """ค้นหา index ของสนามอย่างละเอียด"""
+    for idx, r_code in enumerate(room_ids):
+        code_lower = r_code.lower()
+        # ค้นหาคำที่น่าจะเป็นสนามทั้งหมด
+        if any(x in code_lower for x in ['สนาม', 'stadium', 'field', 'sport', 'gym', 'football', 'soccer']):
+            return idx
+    # ถ้าหาไม่เจอจริงๆ ให้ใช้ห้องสุดท้าย (สมมติว่าเป็นลานเอนกประสงค์)
+    return len(room_ids) - 1
+
 # --- 4. Initialization ---
 def create_smart_individual(courses, room_count, allowed_teachers_map, room_ids):
     ind = [None] * len(courses)
-    
-    # หา Index ของสนาม
-    stadium_idx = 0
-    for idx, r_code in enumerate(room_ids):
-        if 'สนาม' in r_code or 'stadium' in r_code.lower():
-            stadium_idx = idx
-            break
+    stadium_idx = find_stadium_index(room_ids)
 
-    for i, course in enumerate(courses):
+    # เทคนิค: สุ่มแบบ Shuffle เพื่อกระจายการจอง
+    indices = list(range(len(courses)))
+    random.shuffle(indices)
+
+    for i in indices:
+        course = courses[i]
         duration, is_scout, _, _ = get_course_metadata(course)
         
         valid_teachers = allowed_teachers_map.get(i, [0])
         teacher_idx = random.choice(valid_teachers) if valid_teachers else 0
         
         if is_scout:
-            # กฎข้อ 7: ลูกเสือ วันพุธ (Day 2) 15:00 (Slot 7) -> Index 27
+            # FIX: บังคับลงวันพุธ (Day 2) เวลา 15:00 (Slot 7) -> Index 27
             scout_slot = 27 
             ind[i] = [stadium_idx, scout_slot, teacher_idx]
         else:
+            # การสุ่มห้องและเวลาทั่วไป
             room_idx = random.randint(0, room_count - 1)
             
-            # สุ่มวันเวลา (เลี่ยงพักเที่ยง)
-            d = random.randint(0, DAYS - 1)
-            s = random.randint(0, 8) 
-            if s >= LUNCH_SLOT: s += 1 
+            # พยายามสุ่มหา Slot ที่ไม่ชนกับพักเที่ยง
+            found_slot = False
+            for _ in range(10): # ลองสุ่ม 10 ครั้ง
+                d = random.randint(0, DAYS - 1)
+                s = random.randint(0, 8) 
+                if s >= LUNCH_SLOT: s += 1 
+                
+                if s + duration <= SLOTS_PER_DAY:
+                    final_slot = (d * SLOTS_PER_DAY) + s
+                    ind[i] = [room_idx, final_slot, teacher_idx]
+                    found_slot = True
+                    break
             
-            if s + duration > SLOTS_PER_DAY:
-                s = SLOTS_PER_DAY - duration
-            
-            final_slot = (d * SLOTS_PER_DAY) + s
-            ind[i] = [room_idx, final_slot, teacher_idx]
+            # ถ้าสุ่มไม่เจอ ให้ลง default ไปก่อน (เดี๋ยว Mutation ช่วยแก้)
+            if not found_slot:
+                ind[i] = [room_idx, 0, teacher_idx]
 
     return creator.Individual(ind)
 
 # --- 5. Mutation ---
-def smart_mutate(individual, courses, room_count, allowed_teachers_map, indpb=0.2):
+def smart_mutate(individual, courses, room_count, allowed_teachers_map, indpb=0.3):
     for i, gene in enumerate(individual):
         _, is_scout, _, _ = get_course_metadata(courses[i])
         
-        if is_scout: continue # ห้ามแก้ลูกเสือ
+        if is_scout: continue # ห้ามแตะต้องลูกเสือเด็ดขาด
         
-        if random.random() < indpb: # Mutate Room
+        # Mutate Room
+        if random.random() < indpb: 
             gene[0] = random.randint(0, room_count - 1)
         
-        if random.random() < indpb: # Mutate Time
+        # Mutate Time
+        if random.random() < indpb: 
             d = random.randint(0, DAYS - 1)
+            # เพิ่มโอกาสลงช่วงบ่าย (เพื่อกระจายจากเช้า)
             candidates = [0, 1, 2, 3, 5, 6, 7]
             s = random.choice(candidates)
             duration, _, _, _ = get_course_metadata(courses[i])
+            
             if s + duration > SLOTS_PER_DAY:
                 s = SLOTS_PER_DAY - duration
             gene[1] = (d * SLOTS_PER_DAY) + s
             
-        if random.random() < indpb: # Mutate Teacher
+        # Mutate Teacher
+        if random.random() < indpb: 
             valid = allowed_teachers_map.get(i, [])
             if valid: gene[2] = random.choice(valid)
                 
     return individual,
 
-# --- 6. Fitness Function ---
+# --- 6. Fitness Function (High Penalty) ---
 def evaluate(individual, courses, room_ids, instructor_ids, 
              room_details, instructor_details_map, head_instructor_ids):
     penalty = 0
@@ -133,10 +151,10 @@ def evaluate(individual, courses, room_ids, instructor_ids,
         
         duration, is_scout, is_comp_subj, advisor_id = get_course_metadata(course)
         
-        # Group ID: สร้าง Unique Key ของกลุ่มเรียน
+        # Group ID check
         dept = course.get('department')
         yr = course.get('year_level')
-        grp = course.get('group_no', '1') # Default '1' ตาม Schema
+        grp = course.get('group_no', '1')
         group_id = f"{dept}_{yr}_{grp}"
         
         teacher_obj = instructor_details_map.get(teacher_id, {})
@@ -156,13 +174,12 @@ def evaluate(individual, courses, room_ids, instructor_ids,
         elif not is_comp_subj and is_room_comp:
             penalty += 5_000
 
-        # กฎข้อ 7: ลูกเสือ
+        # กฎข้อ 7: ลูกเสือ (เช็คซ้ำเพื่อความชัวร์)
         if is_scout:
-            if day != 2 or slot != 7: penalty += 500_000
-            if 'สนาม' not in room_code: penalty += 100_000
-            # กฎข้อ 17: (ข้ามถ้าไม่มีข้อมูล advisor_id)
-            if advisor_id and int(advisor_id) != int(teacher_id):
-                penalty += 200_000
+            if day != 2 or slot != 7: penalty += 1_000_000 # ต้องถูกเสมอ
+            # หาคำว่าสนามไม่เจอ ปรับหนักๆ
+            if not any(x in room_code.lower() for x in ['สนาม', 'stadium', 'field']):
+                 penalty += 500_000 
 
         # กฎข้อ 13: ครูเมธา
         if 'เมธา' in teacher_name:
@@ -184,17 +201,26 @@ def evaluate(individual, courses, room_ids, instructor_ids,
             teacher_hours[teacher_id] += 1
             teacher_days_active[teacher_id].add(day)
             
+            # --- Zero Tolerance Collision Checks ---
+            # ปรับ Penalty เป็น 1 ล้าน เพื่อห้ามชนเด็ดขาด
+            
             # กฎข้อ 6: ห้องชน
-            if (curr_abs, r_idx) in room_usage: penalty +=1_000_000
-            else: room_usage[(curr_abs, r_idx)] = True
+            if (curr_abs, r_idx) in room_usage: 
+                penalty += 1_000_000
+            else: 
+                room_usage[(curr_abs, r_idx)] = True
             
             # กฎข้อ 4, 5: ครูชน
-            if (curr_abs, teacher_id) in teacher_usage: penalty +=1_000_000
-            else: teacher_usage[(curr_abs, teacher_id)] = True
+            if (curr_abs, teacher_id) in teacher_usage: 
+                penalty += 1_000_000
+            else: 
+                teacher_usage[(curr_abs, teacher_id)] = True
                 
             # กฎข้อ 3: นร.ชน
-            if (curr_abs, group_id) in student_usage: penalty +=1_000_000
-            else: student_usage[(curr_abs, group_id)] = True
+            if (curr_abs, group_id) in student_usage: 
+                penalty += 1_000_000
+            else: 
+                student_usage[(curr_abs, group_id)] = True
 
     # --- Summary Checks ---
     hours_values = []
@@ -203,14 +229,14 @@ def evaluate(individual, courses, room_ids, instructor_ids,
         teacher_obj = instructor_details_map.get(tid, {})
         dept = teacher_obj.get('department', '')
         
-        # กฎข้อ 1: หัวหน้าสอน 18-24 (เช็คจาก ID ที่หามาแล้ว)
+        # กฎข้อ 1: หัวหน้าสอน 18-24
         if tid in head_instructor_ids:
-            if h < 18: penalty += 20_000 * (18 - h)
-            if h > 24: penalty += 20_000 * (h - 24)
+            if h < 18: penalty += 50_000 * (18 - h) # ปรับหนักขึ้น
+            if h > 24: penalty += 50_000 * (h - 24)
         
         # กฎข้อ 2: ทั่วไปสอน >= 18
         elif h < 18:
-            penalty += 10_000 * (18 - h)
+            penalty += 20_000 * (18 - h)
             
         # กฎข้อ 12: ครูคอมสอนทุกวัน
         if 'คอม' in str(dept) or 'computer' in str(dept).lower():
@@ -221,13 +247,14 @@ def evaluate(individual, courses, room_ids, instructor_ids,
 
     # กฎข้อ 14: เกลี่ยชั่วโมง
     if hours_values:
-        penalty += (np.std(hours_values) * 1000)
+        penalty += (np.std(hours_values) * 5000) # เพิ่มน้ำหนัก SD
 
     return (penalty,)
 
 # --- 7. Main Execution ---
 def run_genetic_algorithm(mode='balanced'):
     print(f"🧬 AI SCHEDULER STARTED... MODE: {mode.upper()}")
+    # ใช้ config ที่ปรับจูนแล้ว
     cfg = GEN_CONFIGS.get(mode, GEN_CONFIGS['balanced'])
 
     try:
@@ -251,7 +278,7 @@ def run_genetic_algorithm(mode='balanced'):
         }
         instructor_db_id_to_index = {int(ins['id']): idx for idx, ins in enumerate(instructors)}
         
-        # Identify Heads (ใช้ field 'position_role' ตาม Schema)
+        # Identify Heads
         head_instructor_ids = set()
         for ins in instructors:
             pos = str(ins.get('position_role', '')).lower()
@@ -266,7 +293,6 @@ def run_genetic_algorithm(mode='balanced'):
             if isinstance(subj_data, list) and subj_data: subj_data = subj_data[0]
             
             if subj_data:
-                # เช็ค instructor_1 ตาม Schema (เผื่อมีถึง 5 ก็ loop ไว้ได้ไม่เสียหาย)
                 for k in range(1, 6): 
                     fname = subj_data.get(f'instructor_{k}_fname')
                     lname = subj_data.get(f'instructor_{k}_lname')
@@ -309,9 +335,11 @@ def run_genetic_algorithm(mode='balanced'):
             hof = tools.HallOfFame(1)
             stats = tools.Statistics(lambda ind: ind.fitness.values)
             stats.register("min", np.min)
+            stats.register("avg", np.mean)
             
+            # ใช้ verbose=True เพื่อดู log การทำงานแต่ละ Generation
             pop, log = algorithms.eaSimple(pop, toolbox, cxpb=0.7, mutpb=cfg['mutation_prob'],     
-                                           ngen=cfg['generations'], stats=stats, halloffame=hof, verbose=False)
+                                           ngen=cfg['generations'], stats=stats, halloffame=hof, verbose=True)
             
             current_best = hof[0]
             fit = current_best.fitness.values[0]
@@ -361,7 +389,6 @@ def save_to_db(best_schedule, courses, room_ids, instructor_ids):
                     "start_slot": int(slot_in_day),
                     "department": course.get('department', 'General'),
                     "year_level": course.get('year_level', 'N/A')
-                    # group_no ถูกตัดออกเพราะไม่มีใน Schema ของ generated_schedules
                 }
                 data_list.append(record)
         
