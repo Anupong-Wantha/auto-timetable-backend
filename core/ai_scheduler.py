@@ -18,10 +18,11 @@ SLOTS_PER_DAY = 10  # 08:00 - 17:00
 LUNCH_SLOT = 4      # 12:00 - 13:00
 
 # เพิ่มขนาดประชากรและรอบการทำงาน เพื่อให้ AI หาคำตอบได้ดีขึ้น
+# ปรับลดจำนวนประชากรและรอบลง เพื่อให้รันเสร็จไวขึ้น (แต่ตารางอาจจะไม่เนียนเท่าเดิม)
 GEN_CONFIGS = {
-    'balanced': {'pop_size': 800, 'generations': 200, 'runs': 1, 'mutation_prob': 0.3},
-    'precise':  {'pop_size': 1000, 'generations': 500, 'runs': 1, 'mutation_prob': 0.2},
-    'fast':     {'pop_size': 300, 'generations': 50,  'runs': 1, 'mutation_prob': 0.4}
+    'balanced': {'pop_size': 200, 'generations': 50, 'runs': 1, 'mutation_prob': 0.3}, # ลดจาก 800/200
+    'precise':  {'pop_size': 500, 'generations': 100, 'runs': 1, 'mutation_prob': 0.2},
+    'fast':     {'pop_size': 100, 'generations': 20,  'runs': 1, 'mutation_prob': 0.4}
 }
 
 # --- 3. Helper Functions ---
